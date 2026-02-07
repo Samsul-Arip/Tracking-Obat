@@ -13,6 +13,8 @@ export function setupDBCallbacks(updateUICb, renderMonthCb) {
     onRenderMonth = renderMonthCb;
 }
 
+export { initData, getTransactions, addTransaction, removeTransaction, getStock, loadMonthData, getReportCache, setReportCache };
+
 function initData() {
     document.getElementById('loadingSpinner').style.display = 'block';
     // Lazy Load: Limit initial fetch to 100
@@ -20,6 +22,10 @@ function initData() {
     unsubscribe = onSnapshot(query(collection(db, colName), orderBy("date", "desc")), (s) => {
         transactions = [];
         s.docs.forEach(d => transactions.push({ ...d.data(), id: d.id }));
+
+        // Clear cache on update to ensure reports reflect new data
+        reportCache = {};
+
         document.getElementById('loadingSpinner').style.display = 'none';
         if (onUpdateUI) onUpdateUI();
     });
@@ -48,9 +54,21 @@ async function loadMonthData(year, monthKey, monthName) {
     const container = document.getElementById(`content-${monthKey}`);
     if (!container) return;
 
-    // If already loaded (check cache), do nothing (or re-render if needed)
+    // Calculate Opening Stock (Stok Awal)
+    // Sum of all transactions BEFORE this month
+    const startOfThisMonth = `${monthKey}-01`;
+    const historical = transactions.filter(t => t.date < startOfThisMonth);
+    const openingStocks = {};
+
+    historical.forEach(t => {
+        if (!openingStocks[t.desc]) openingStocks[t.desc] = 0;
+        if (t.type === 'income') openingStocks[t.desc] += t.amount;
+        else openingStocks[t.desc] -= t.amount;
+    });
+
+    // If already loaded (check cache), reuse data but re-render to ensure opening stocks are fresh if needed
     if (reportCache[monthKey]) {
-        if (onRenderMonth) onRenderMonth(reportCache[monthKey], container, year, monthKey);
+        if (onRenderMonth) onRenderMonth(reportCache[monthKey], container, year, monthKey, openingStocks);
         return;
     }
 
@@ -67,7 +85,7 @@ async function loadMonthData(year, monthKey, monthName) {
         snap.forEach(d => data.push({ ...d.data(), id: d.id }));
 
         reportCache[monthKey] = data;
-        if (onRenderMonth) onRenderMonth(data, container, year, monthKey);
+        if (onRenderMonth) onRenderMonth(data, container, year, monthKey, openingStocks);
 
     } catch (e) {
         console.error(e);
@@ -82,5 +100,3 @@ function getReportCache(key) {
 function setReportCache(key, data) {
     reportCache[key] = data;
 }
-
-export { initData, getTransactions, addTransaction, removeTransaction, getStock, loadMonthData, getReportCache, setReportCache };

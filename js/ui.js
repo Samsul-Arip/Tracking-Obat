@@ -174,22 +174,24 @@ function renderStock(d) {
     });
 }
 
-function renderMonthTable(data, container, year, monthKey) {
-    if (data.length === 0) {
+function renderMonthTable(data, container, year, monthKey, openingStocks = {}) {
+    if (data.length === 0 && Object.keys(openingStocks).length === 0) {
         container.innerHTML = `<div class="text-center py-4 text-muted fst-italic">Tidak ada transaksi bulan ini.</div>`;
         return;
     }
 
     const daysInMonth = new Date(year, parseInt(monthKey.split('-')[1]), 0).getDate();
-    const uniqueMeds = [...new Set(data.map(t => t.desc))].sort();
+    // Combine unique meds from current month data AND opening stocks (some meds might have stock but no transactions this month)
+    const uniqueMeds = [...new Set([...data.map(t => t.desc), ...Object.keys(openingStocks)])].sort();
 
     let h = `<table class="table table-bordered table-sm mb-0" style="font-size:0.75rem; min-width: 1200px;">
                 <thead class="table-light text-center align-middle">
                     <tr>
                         <th rowspan="2" style="min-width:150px; position:sticky; left:0; z-index:10; background:#f8f9fa;">Nama Obat</th>
+                        <th rowspan="2" style="min-width:80px; background:#e3f2fd;">Stok Awal</th>
                         <th colspan="${daysInMonth}">Tanggal</th>
                         <th colspan="2">Total</th>
-                        <th rowspan="2" style="min-width:80px;">Sisa (Bln Ini)</th>
+                        <th rowspan="2" style="min-width:80px;">Sisa (Akhir)</th>
                     </tr>
                     <tr>`;
 
@@ -201,10 +203,16 @@ function renderMonthTable(data, container, year, monthKey) {
         const monthTrans = data.filter(t => t.desc === med);
         const totInMonth = monthTrans.filter(t => t.type === 'income').reduce((a, b) => a + b.amount, 0);
         const totOutMonth = monthTrans.filter(t => t.type === 'expense').reduce((a, b) => a + b.amount, 0);
-        const sisa = totInMonth - totOutMonth; // Only for this month
+
+        const stokAwal = openingStocks[med] || 0;
+        const sisa = stokAwal + totInMonth - totOutMonth;
+
+        // Hide rows with 0 start, 0 in, 0 out (inactive)
+        if (stokAwal === 0 && totInMonth === 0 && totOutMonth === 0) return;
 
         h += `<tr>
-                <td class="fw-bold" style="position:sticky; left:0; background:white; z-index:5;">${med}</td>`;
+                <td class="fw-bold" style="position:sticky; left:0; background:white; z-index:5;">${med}</td>
+                <td class="text-center fw-bold bg-light text-primary bg-opacity-10">${fmtNum(stokAwal)}</td>`;
 
         for (let i = 1; i <= daysInMonth; i++) {
             const dateStr = `${monthKey}-${String(i).padStart(2, '0')}`;
@@ -271,8 +279,21 @@ function setupAutocomplete(inputId, boxId) {
 async function downloadExcel(year, monthKey, monthName) {
     // Ensure data is loaded
     let data = getReportCache(monthKey);
+    let openingStocks = {}; // We need to re-calculate this for excel
+
+    // Recalculate opening stocks from global transactions
+    const allTrans = getTransactions();
+    const startOfThisMonth = `${monthKey}-01`;
+    const historical = allTrans.filter(t => t.date < startOfThisMonth);
+    historical.forEach(t => {
+        if (!openingStocks[t.desc]) openingStocks[t.desc] = 0;
+        if (t.type === 'income') openingStocks[t.desc] += t.amount;
+        else openingStocks[t.desc] -= t.amount;
+    });
+
+
     if (!data) {
-        // Fetch if not cached (similar to loadMonthData)
+        // Fetch if not cached
         try {
             const daysInMonth = new Date(year, parseInt(monthKey.split('-')[1]), 0).getDate();
             const startStr = `${monthKey}-01`;
@@ -281,7 +302,8 @@ async function downloadExcel(year, monthKey, monthName) {
             const snap = await getDocs(q);
             data = [];
             snap.forEach(d => data.push({ ...d.data(), id: d.id }));
-            setReportCache(monthKey, data); // Cache it
+
+            // Note: We don't cache here because db.js handles caching, but we need data now.
         } catch (e) {
             alert("Gagal mengambil data untuk export.");
             return;
@@ -289,17 +311,16 @@ async function downloadExcel(year, monthKey, monthName) {
     }
 
     const daysInMonth = new Date(year, parseInt(monthKey.split('-')[1]), 0).getDate();
-    const monthEndStr = `${monthKey}-${daysInMonth}`;
 
-    // Get Data
-    const uniqueMeds = [...new Set(data.map(t => t.desc))].sort();
+    // Combine med names
+    const uniqueMeds = [...new Set([...data.map(t => t.desc), ...Object.keys(openingStocks)])].sort();
 
     // Prepare Headers (2 Rows)
-    const header1 = ["Nama Obat", "Tanggal"];
+    const header1 = ["Nama Obat", "Stok Awal", "Tanggal"];
     for (let i = 1; i < daysInMonth; i++) header1.push(""); // Spacers for Tanggal
-    header1.push("Total", "", "Sisa");
+    header1.push("Total", "", "Sisa Akhir");
 
-    const header2 = [""]; // Spacer for Nama Obat
+    const header2 = ["", ""]; // Spacer for Nama Obat & Stok Awal
     for (let i = 1; i <= daysInMonth; i++) header2.push(`${i}`);
     header2.push("Masuk", "Keluar", ""); // Spacer for Sisa
 
@@ -308,16 +329,26 @@ async function downloadExcel(year, monthKey, monthName) {
     // Merges
     const merges = [
         { s: { r: 0, c: 0 }, e: { r: 1, c: 0 } }, // Nama Obat
-        { s: { r: 0, c: 1 }, e: { r: 0, c: daysInMonth } }, // Tanggal (1 to N)
-        { s: { r: 0, c: daysInMonth + 1 }, e: { r: 0, c: daysInMonth + 2 } }, // Total
-        { s: { r: 0, c: daysInMonth + 3 }, e: { r: 1, c: daysInMonth + 3 } } // Sisa
+        { s: { r: 0, c: 1 }, e: { r: 1, c: 1 } }, // Stok Awal
+        { s: { r: 0, c: 2 }, e: { r: 0, c: daysInMonth + 1 } }, // Tanggal (1 to N)
+        { s: { r: 0, c: daysInMonth + 2 }, e: { r: 0, c: daysInMonth + 3 } }, // Total
+        { s: { r: 0, c: daysInMonth + 4 }, e: { r: 1, c: daysInMonth + 4 } } // Sisa
     ];
 
     uniqueMeds.forEach(med => {
-        const row = [med];
+        const stokAwal = openingStocks[med] || 0;
+
+        // Monthly Totals
+        const monthTrans = data.filter(t => t.desc === med);
+        const totInMonth = monthTrans.filter(t => t.type === 'income').reduce((a, b) => a + b.amount, 0);
+        const totOutMonth = monthTrans.filter(t => t.type === 'expense').reduce((a, b) => a + b.amount, 0);
+
+        // Filter out inactive
+        if (stokAwal === 0 && totInMonth === 0 && totOutMonth === 0) return;
+
+        const row = [med, stokAwal];
 
         // Daily Data
-        const monthTrans = data.filter(t => t.desc === med);
         for (let i = 1; i <= daysInMonth; i++) {
             const dateStr = `${monthKey}-${String(i).padStart(2, '0')}`;
             const dayTrans = monthTrans.filter(t => t.date === dateStr);
@@ -330,12 +361,8 @@ async function downloadExcel(year, monthKey, monthName) {
             row.push(cellVal.trim());
         }
 
-        // Totals
-        const totInMonth = monthTrans.filter(t => t.type === 'income').reduce((a, b) => a + b.amount, 0);
-        const totOutMonth = monthTrans.filter(t => t.type === 'expense').reduce((a, b) => a + b.amount, 0);
-
-        // Cumulative Sisa (Only for this month in lazy load mode)
-        const sisa = totInMonth - totOutMonth;
+        // Cumulative Sisa
+        const sisa = stokAwal + totInMonth - totOutMonth;
 
         row.push(totInMonth, totOutMonth, sisa);
         excelData.push(row);
@@ -349,10 +376,10 @@ async function downloadExcel(year, monthKey, monthName) {
     ws['!merges'] = merges;
 
     // Freeze Panes
-    ws['!freeze'] = { xSplit: 1, ySplit: 2, topLeftCell: "B3", activePane: "bottomRight", state: "frozen" };
+    ws['!freeze'] = { xSplit: 2, ySplit: 2, topLeftCell: "C3", activePane: "bottomRight", state: "frozen" };
 
     // Auto-width
-    const wscols = [{ wch: 25 }]; // Name
+    const wscols = [{ wch: 25 }, { wch: 10 }]; // Name, Stok Awal
     for (let i = 0; i < daysInMonth; i++) wscols.push({ wch: 5 }); // Dates
     wscols.push({ wch: 12 }, { wch: 12 }, { wch: 10 }); // Totals
     ws['!cols'] = wscols;
